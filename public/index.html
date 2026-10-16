@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Globulos Private</title>
+  <style>
+    body { margin: 0; background: #17212b; color: white; font-family: Arial, sans-serif; text-align: center; }
+    h1 { margin: 16px 0 4px; }
+    p { color: #cbd5e1; margin: 6px 12px; }
+    #score { font-size: 26px; font-weight: bold; margin: 6px 0; }
+    #score .b { color: #60a5fa; } #score .r { color: #f87171; }
+    canvas { display: block; width: min(900px, 96vw); height: auto; margin: 10px auto; border: 3px solid #64748b;
+      border-radius: 12px; background: #3f8f3f; cursor: crosshair; touch-action: none; }
+    #readyRow { display: flex; justify-content: space-between; width: min(900px, 96vw); margin: 8px auto; }
+    #controls, .menuRow { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 10px; }
+    button, input[type=text] { font-size: 16px; padding: 10px 16px; border-radius: 8px; border: 0; background: #334155; color: white; }
+    button { cursor: pointer; }
+    input[type=text] { background: #0f172a; border: 1px solid #475569; text-align: center; }
+    #codeIn { width: 90px; text-transform: uppercase; letter-spacing: 3px; }
+    .teamBtn { font-weight: bold; min-width: 170px; }
+    .teamBtn.blue { background: #2563eb; } .teamBtn.red { background: #dc2626; }
+    .teamBtn.blue.ready, .teamBtn.red.ready { background: #16a34a; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    label.opt { display: flex; align-items: center; gap: 8px; font-size: 16px; color: #e2e8f0; cursor: pointer; }
+    #status { font-size: 17px; color: #fde68a; min-height: 24px; }
+    #menuMsg { color: #fca5a5; min-height: 22px; }
+  </style>
+</head>
+<body>
+  <h1>Globulos Private</h1>
+
+  <div id="menu">
+    <p>Twój nick: <input type="text" id="nick" maxlength="16" placeholder="Gracz"></p>
+    <div class="menuRow"><button id="btnAI">Graj z komputerem</button><button id="btnLocal">Dwie osoby, jeden ekran</button></div>
+    <div class="menuRow"><button id="btnCreate">Utwórz grę online</button></div>
+    <div class="menuRow"><input type="text" id="codeIn" maxlength="4" placeholder="KOD"><button id="btnJoin">Dołącz do gry</button></div>
+    <p id="menuMsg"></p>
+  </div>
+
+  <div id="gameUI" hidden>
+    <div id="score"><span class="b" id="sb"></span> : <span class="r" id="sr"></span></div>
+    <canvas id="game" width="900" height="520"></canvas>
+    <p id="status"></p>
+    <div id="readyRow">
+      <button id="readyBlue" class="teamBtn blue">Gotowe ▶</button>
+      <button id="readyRed" class="teamBtn red" hidden>Gotowe czerwony ▶</button>
+    </div>
+    <div id="controls">
+      <label class="opt"><input type="checkbox" id="timerToggle" checked> Limit czasu (20 s)</label>
+      <button id="newGame">Nowa gra</button>
+      <button id="copyLink" hidden>Kopiuj link do gry</button>
+      <button id="leave">Wyjdź do menu</button>
+    </div>
+    <p>Przeciągnij od swojej kulki, by ustawić kierunek i siłę. Stuknięcie w kulkę kasuje jej plan. Gdy ustawisz wszystkie, kliknij „Gotowe”. Gdy obie strony są gotowe, kulki ruszają naraz.</p>
+  </div>
+
+  <script src="game.js"></script>
+  <script>
+    const { C, create } = Globulos;
+    const { W, H, FIELD_L, FIELD_R, GOAL_TOP, GOAL_BOTTOM } = C;
+    const g = create();
+    const $ = id => document.getElementById(id);
+    const canvas = $("game"), ctx = canvas.getContext("2d");
+    const COLORS = { blue: "#2878e8", red: "#ef4444", ball: "#ffffff" };
+
+    let mode = null;                       // "ai" | "local" | "online"
+    let myTeam = null, roomStatus = "waiting", roomCode = "", connected = false;
+    let names = { blue: "Niebieski", red: "Czerwony" };
+    let ws = null, session = null, pending = null, retryTimer = null, pingTimer = null;
+    let selected = null, dragStart = null;
+
+    // ---------- Menu ----------
+    const nick = () => $("nick").value.trim() || "Gracz";
+    function showGame(on) { $("menu").hidden = on; $("gameUI").hidden = !on; }
+    function menuMessage(t) { $("menuMsg").textContent = t || ""; }
+
+    function startLocal(m) {
+      mode = m; myTeam = null;
+      g.aiTeam = m === "ai" ? "red" : null;
+      g.timerOn = $("timerToggle").checked;
+      names = { blue: m === "ai" ? nick() : "Niebieski", red: m === "ai" ? "Komputer" : "Czerwony" };
+      g.newGame(); showGame(true);
+    }
+    $("btnAI").onclick = () => startLocal("ai");
+    $("btnLocal").onclick = () => startLocal("local");
+    $("btnCreate").onclick = () => goOnline({ t: "create", name: nick() });
+    $("btnJoin").onclick = () => {
+      const code = $("codeIn").value.trim().toUpperCase();
+      if (code.length !== 4) return menuMessage("Wpisz 4-znakowy kod pokoju.");
+      goOnline({ t: "join", code, name: nick() });
+    };
+
+    // ---------- Sieć ----------
+    function goOnline(first) {
+      if (location.protocol === "file:") return menuMessage("Tryb online działa tylko przez serwer (np. http://localhost:3000).");
+      menuMessage(""); mode = "online"; pending = first; g.aiTeam = null; connect();
+    }
+    const sendMsg = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+
+    function connect() {
+      clearTimeout(retryTimer);
+      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
+      ws.onopen = () => {
+        connected = true;
+        if (session) sendMsg({ t: "rejoin", code: session.code, token: session.token });
+        else if (pending) sendMsg(pending);
+        clearInterval(pingTimer);
+        pingTimer = setInterval(() => sendMsg({ t: "ping" }), 20000);   // podtrzymuje połączenie
+      };
+      ws.onmessage = e => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
+      ws.onclose = () => {
+        connected = false; clearInterval(pingTimer);
+        if (mode !== "online") return;
+        if (session || pending) retryTimer = setTimeout(connect, 2000);   // automatyczne łączenie ponowne
+      };
+    }
+
+    function handle(m) {
+      if (m.t === "joined") {
+        session = { code: m.code, token: m.token }; pending = null;
+        sessionStorage.setItem("globulos", JSON.stringify(session));
+        myTeam = m.team; roomCode = m.code; showGame(true);
+      } else if (m.t === "room") {
+        roomStatus = m.status; names = m.names;
+      } else if (m.t === "s") {
+        g.apply(m);
+        if (g.phase !== "plan") { selected = null; dragStart = null; }
+      } else if (m.t === "error") {
+        pending = null; leave(); menuMessage(m.msg);
+      } else if (m.t === "closed") {
+        leave(); menuMessage(m.msg);
+      }
+    }
+
+    function leave() {
+      mode = null; session = null; pending = null; myTeam = null;
+      sessionStorage.removeItem("globulos");
+      clearTimeout(retryTimer); clearInterval(pingTimer);
+      if (ws) { ws.onclose = null; ws.close(); ws = null; }
+      connected = false; roomStatus = "waiting"; selected = dragStart = null;
+      showGame(false);
+    }
+    $("leave").onclick = () => { leave(); menuMessage(""); };
+
+    // ---------- Sterowanie ----------
+    const teamsOf = () => mode === "ai" ? ["blue"] : mode === "local" ? ["blue", "red"] : myTeam ? [myTeam] : [];
+    const canPlan = () => g.phase === "plan" && (mode !== "online" || (connected && roomStatus === "playing"));
+
+    function controllable() {
+      if (!canPlan()) return [];
+      return g.ents.filter(e => e.team !== "ball" && e.alive && teamsOf().includes(e.team) && !g.ready[e.team]);
+    }
+    function sendPlans() {
+      if (mode !== "online") return;
+      sendMsg({ t: "plans", plans: g.ents.filter(e => e.team === myTeam).map(e => e.plan) });
+    }
+    function getPos(ev) {
+      const r = canvas.getBoundingClientRect();
+      return { x: (ev.clientX - r.left) * W / r.width, y: (ev.clientY - r.top) * H / r.height };
+    }
+    canvas.addEventListener("pointerdown", ev => {
+      const pos = getPos(ev);
+      selected = controllable().find(p => Math.hypot(p.x - pos.x, p.y - pos.y) <= p.r + 8) || null;
+      if (selected) { dragStart = pos; canvas.setPointerCapture(ev.pointerId); }
+    });
+    canvas.addEventListener("pointermove", ev => {
+      if (!selected || !dragStart) return;
+      const pos = getPos(ev), dx = pos.x - dragStart.x, dy = pos.y - dragStart.y, d = Math.hypot(dx, dy);
+      if (d > 5) {
+        const power = Math.min(d, C.MAX_DRAG);
+        selected.plan = { vx: dx / d * power * C.SHOT_SCALE, vy: dy / d * power * C.SHOT_SCALE };
+      }
+    });
+    function release(ev) {
+      if (selected && dragStart) {
+        const pos = getPos(ev);
+        if (Math.hypot(pos.x - dragStart.x, pos.y - dragStart.y) <= 5) selected.plan = null;
+        sendPlans();
+      }
+      selected = dragStart = null;
+    }
+    canvas.addEventListener("pointerup", release);
+    canvas.addEventListener("pointercancel", release);
+
+    function toggleReady(team) {
+      if (!canPlan()) return;
+      const v = !g.ready[team];
+      if (mode === "online") {
+        if (v) sendPlans();
+        sendMsg({ t: v ? "ready" : "unready" });
+      }
+      g.ready[team] = v;   // w trybie online serwer i tak potwierdzi stan
+    }
+    $("readyBlue").onclick = () => toggleReady(mode === "online" ? myTeam : "blue");
+    $("readyRed").onclick = () => toggleReady(mode === "online" ? myTeam : "red");
+    $("newGame").onclick = () => { if (mode === "online") sendMsg({ t: "newgame" }); else { selected = null; g.newGame(); } };
+    $("timerToggle").onchange = () => {
+      if (mode === "online") sendMsg({ t: "settings", timerOn: $("timerToggle").checked });
+      else g.timerOn = $("timerToggle").checked;
+    };
+    $("copyLink").onclick = () => {
+      const link = location.origin + "/?room=" + roomCode;
+      (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(
+        () => { $("copyLink").textContent = "Skopiowano ✔"; setTimeout(() => { $("copyLink").textContent = "Kopiuj link do gry"; }, 1500); },
+        () => prompt("Skopiuj link:", link));
+    };
+
+    // ---------- Rysowanie ----------
+    function drawPitch() {
+      for (let i = 0; i < 10; i++) {
+        ctx.fillStyle = i % 2 ? "#3f8f3f" : "#459845";
+        ctx.fillRect(FIELD_L + i * (FIELD_R - FIELD_L) / 10, 0, (FIELD_R - FIELD_L) / 10 + 1, H);
+      }
+      ctx.fillStyle = "#2f6f2f"; ctx.fillRect(0, 0, FIELD_L, H); ctx.fillRect(FIELD_R, 0, W - FIELD_R, H);
+      ctx.fillStyle = "#d8e0d0";
+      ctx.fillRect(0, GOAL_TOP, FIELD_L, GOAL_BOTTOM - GOAL_TOP);
+      ctx.fillRect(FIELD_R, GOAL_TOP, W - FIELD_R, GOAL_BOTTOM - GOAL_TOP);
+      ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 1;
+      for (let y = GOAL_TOP; y <= GOAL_BOTTOM; y += 14) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(FIELD_L, y); ctx.moveTo(FIELD_R, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+      ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 3;
+      ctx.strokeRect(FIELD_L, 2, FIELD_R - FIELD_L, H - 4);
+      ctx.beginPath(); ctx.moveTo(W / 2, 2); ctx.lineTo(W / 2, H - 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(W / 2, H / 2, 60, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeRect(FIELD_L, 140, 110, 240); ctx.strokeRect(FIELD_R - 110, 140, 110, 240);
+      for (const p of g.posts) {
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = "#f1f5f9"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#64748b"; ctx.stroke();
+      }
+    }
+    function drawEntity(e) {
+      ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS[e.team]; ctx.fill();
+      ctx.lineWidth = e === selected ? 5 : 3;
+      ctx.strokeStyle = e === selected ? "#facc15" : (e.team === "ball" ? "#1f2937" : "#ffffff"); ctx.stroke();
+      if (e.team !== "ball") {
+        ctx.beginPath(); ctx.arc(e.x - 5, e.y - 6, 4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.fill();
+      }
+    }
+    function drawPlan(p) {
+      if (!p.alive || !p.plan || p.team === "ball" || g.phase !== "plan") return;
+      if (!teamsOf().includes(p.team)) return;               // cudzych planów nie rysujemy
+      if (mode !== "ai" && g.ready[p.team]) return;          // kto kliknął GOTOWE, ma ukryte strzałki
+      const speed = Math.hypot(p.plan.vx, p.plan.vy), power = speed / C.SHOT_SCALE;
+      const nx = p.plan.vx / speed, ny = p.plan.vy / speed, len = 35 + power * 1.2;
+      const ex = p.x + nx * len, ey = p.y + ny * len, a = Math.atan2(ny, nx);
+      ctx.strokeStyle = power > 70 ? "#fde047" : (p.team === "blue" ? "#1e3a8a" : "#7f1d1d");
+      ctx.lineWidth = 4; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(p.x + nx * p.r, p.y + ny * p.r); ctx.lineTo(ex, ey);
+      ctx.moveTo(ex, ey); ctx.lineTo(ex - 12 * Math.cos(a - Math.PI / 6), ey - 12 * Math.sin(a - Math.PI / 6));
+      ctx.moveTo(ex, ey); ctx.lineTo(ex - 12 * Math.cos(a + Math.PI / 6), ey - 12 * Math.sin(a + Math.PI / 6));
+      ctx.stroke();
+    }
+    function banner(text, sub) {
+      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0, H / 2 - 50, W, 100);
+      ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+      ctx.font = "bold 44px Arial"; ctx.fillText(text, W / 2, H / 2 + (sub ? 6 : 16));
+      if (sub) { ctx.font = "20px Arial"; ctx.fillText(sub, W / 2, H / 2 + 36); }
+    }
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      drawPitch();
+      g.ents.forEach(drawPlan);
+      g.ents.filter(e => e.alive && e.team !== "ball").forEach(drawEntity);
+      drawEntity(g.ball);
+      if (g.phase === "plan" && g.timerOn) {
+        ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.font = "bold 22px Arial"; ctx.textAlign = "center";
+        ctx.fillText(Math.ceil(Math.max(g.timeLeft, 0)) + " s", W / 2, 30);
+      }
+      if (mode === "online" && !connected) banner("Łączenie…");
+      else if (mode === "online" && roomStatus === "waiting") banner("Czekam na przeciwnika…", "Kod pokoju: " + roomCode);
+      else if (mode === "online" && roomStatus === "paused") banner("Przeciwnik się rozłączył…", "Czekamy, aż wróci");
+      else if (g.phase === "goal") banner("GOL!");
+      else if (g.phase === "over") banner(g.winner === "blue" ? "WYGRALI NIEBIESCY" : "WYGRALI CZERWONI");
+    }
+
+    // ---------- Interfejs ----------
+    const teamPl = t => t === "blue" ? "niebieskich" : "czerwonych";
+    function updateUI() {
+      const online = mode === "online";
+      $("sb").textContent = names.blue + " " + g.score.blue;
+      $("sr").textContent = g.score.red + " " + names.red;
+      $("readyBlue").hidden = online ? myTeam !== "blue" : false;
+      $("readyRed").hidden = online ? myTeam !== "red" : mode === "ai";
+      ["Blue", "Red"].forEach(k => {
+        const team = k.toLowerCase(), b = $("ready" + k);
+        b.classList.toggle("ready", g.ready[team]);
+        b.textContent = g.ready[team] ? "✔ Gotowe (cofnij)"
+          : (mode === "local" ? "Gotowe " + (team === "blue" ? "niebieski" : "czerwony") + " ▶" : "Gotowe ▶");
+        b.disabled = !canPlan();
+      });
+      $("copyLink").hidden = !online;
+      $("newGame").disabled = online && !(myTeam === "blue" || g.phase === "over");
+      if (online) {
+        $("timerToggle").checked = g.timerOn;
+        $("timerToggle").disabled = myTeam !== "blue";
+      }
+
+      let text = "";
+      if (online && !connected) text = "Brak połączenia z serwerem, próbuję ponownie…";
+      else if (online && roomStatus === "waiting") text = "Wyślij znajomemu kod " + roomCode + " lub link (przycisk „Kopiuj link do gry”).";
+      else if (online && roomStatus === "paused") text = "Przeciwnik się rozłączył. Czekamy na jego powrót.";
+      else if (g.phase === "plan") {
+        text = "Planowanie ruchów" + (g.timerOn ? ", czas: " + Math.ceil(Math.max(g.timeLeft, 0)) + " s" : " (bez limitu czasu)");
+        if (g.ready.blue !== g.ready.red && mode !== "ai") {
+          const waiting = g.ready.blue ? "red" : "blue";
+          text += online ? (waiting === myTeam ? " | przeciwnik jest gotowy" : " | czekamy na przeciwnika")
+                         : " | czekamy na " + (waiting === "blue" ? "niebieskiego" : "czerwonego");
+        }
+      } else if (g.phase === "sim") text = "Kulki w ruchu…";
+      else if (g.phase === "goal") text = "Gol dla: " + teamPl(g.lastScorer) + "!" + (g.goalByElim ? " (przeciwnikowi zniknęły wszystkie kulki)" : "");
+      else text = "Koniec gry! Wygrali " + (g.winner === "blue" ? "niebiescy" : "czerwoni") + ". Kliknij „Nowa gra”.";
+      $("status").textContent = text;
+    }
+
+    // ---------- Pętla główna ----------
+    let last = performance.now(), acc = 0;
+    function loop(now) {
+      acc += Math.min(now - last, 100); last = now;
+      if (mode === "ai" || mode === "local") {          // lokalnie liczymy fizykę sami
+        while (acc >= C.STEP_MS) { g.step(); acc -= C.STEP_MS; }
+      } else acc = 0;                                    // online: stan przychodzi z serwera
+      if (!$("gameUI").hidden) { draw(); updateUI(); }
+      requestAnimationFrame(loop);
+    }
+
+    // ---------- Start strony ----------
+    const urlRoom = new URLSearchParams(location.search).get("room");
+    if (urlRoom) $("codeIn").value = urlRoom.toUpperCase().slice(0, 4);
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("globulos") || "null");
+      if (saved && saved.code && saved.token) {   // powrót do gry po odświeżeniu strony
+        session = saved; roomCode = saved.code; mode = "online"; showGame(true); connect();
+      }
+    } catch (e) {}
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
