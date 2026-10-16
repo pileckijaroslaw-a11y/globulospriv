@@ -48,7 +48,7 @@ const sendState = r => broadcast(r, Object.assign({ t: "s" }, r.g.snapshot()));
 function makeRoom(code) {
   const g = create();
   const r = {
-    code, g, socks: { blue: null, red: null }, joinedBoth: false, closeTimer: null, tick: 0,
+    code, g, socks: { blue: null, red: null }, joinedBoth: false, closeTimer: null, tick: 0, chat: [],
     tokens: { blue: crypto.randomBytes(12).toString("hex"), red: crypto.randomBytes(12).toString("hex") },
     names: { blue: "Niebieski", red: "Czerwony" }
   };
@@ -61,6 +61,7 @@ function attach(ws, r, team) {
   r.socks[team] = ws;
   if (r.closeTimer && r.socks.blue && r.socks.red) { clearTimeout(r.closeTimer); r.closeTimer = null; }
   send(ws, { t: "joined", code: r.code, team, token: r.tokens[team] });
+  send(ws, { t: "chatlog", log: r.chat });
   sendRoom(r);
   send(ws, Object.assign({ t: "s" }, r.g.snapshot()));
 }
@@ -110,6 +111,21 @@ wss.on("connection", ws => {
       const old = r.socks[team];
       if (old && old !== ws) { old.room = null; old.terminate(); }
       return attach(ws, r, team);
+    }
+
+    // Czat: działa w każdym pokoju, z ograniczeniem częstotliwości i długości.
+    if (m.t === "chat") {
+      const room = ws.room;
+      if (!room) return;
+      const now = Date.now();
+      if (now - (ws.lastChat || 0) < 500) return;
+      ws.lastChat = now;
+      const text = String(m.text || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 200);
+      if (!text) return;
+      const msg = { t: "chat", team: ws.team, name: room.names[ws.team], text };
+      room.chat.push(msg);
+      if (room.chat.length > 50) room.chat.shift();
+      return broadcast(room, msg);
     }
 
     // Wiadomości dotyczące gry: tylko gdy obaj gracze są połączeni.

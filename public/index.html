@@ -10,9 +10,9 @@
     p { color: #cbd5e1; margin: 6px 12px; }
     #score { font-size: 26px; font-weight: bold; margin: 6px 0; }
     #score .b { color: #60a5fa; } #score .r { color: #f87171; }
-    canvas { display: block; width: min(900px, 96vw); height: auto; margin: 10px auto; border: 3px solid #64748b;
+    canvas { display: block; width: 100%; box-sizing: border-box; height: auto; margin: 10px 0; border: 3px solid #64748b;
       border-radius: 12px; background: #3f8f3f; cursor: crosshair; touch-action: none; }
-    #readyRow { display: flex; justify-content: space-between; width: min(900px, 96vw); margin: 8px auto; }
+    #readyRow { display: flex; justify-content: space-between; width: 100%; margin: 8px 0; }
     #controls, .menuRow { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 10px; }
     button, input[type=text] { font-size: 16px; padding: 10px 16px; border-radius: 8px; border: 0; background: #334155; color: white; }
     button { cursor: pointer; }
@@ -24,6 +24,23 @@
     button:disabled { opacity: 0.6; cursor: default; }
     label.opt { display: flex; align-items: center; gap: 8px; font-size: 16px; color: #e2e8f0; cursor: pointer; }
     #status { font-size: 17px; color: #fde68a; min-height: 24px; }
+    #stage { display: flex; justify-content: center; align-items: flex-start; gap: 12px; margin: 0 auto; }
+    #mainCol { width: min(900px, calc(96vw - 252px)); }
+    #stage.noChat #mainCol { width: min(900px, 96vw); }
+    #chatBox { width: 230px; flex: none; margin-top: 10px; }
+    #chatTitle { font-size: 14px; color: #94a3b8; text-align: left; margin: 0 0 4px 2px; }
+    @media (max-width: 900px) {
+      #stage { flex-direction: column; align-items: center; }
+      #mainCol, #stage.noChat #mainCol { width: 96vw; }
+      #chatBox { width: min(96vw, 460px); }
+    }
+    #chatLog { height: 230px; overflow-y: auto; text-align: left; background: #0f172a; border: 1px solid #475569;
+      border-radius: 8px; padding: 6px 8px; font-size: 13px; line-height: 1.35; word-break: break-word; }
+    #chatLog .b { color: #60a5fa; } #chatLog .r { color: #f87171; }
+    #chatLog .empty { color: #64748b; }
+    #chatRow { display: flex; gap: 6px; margin-top: 6px; }
+    #chatRow input, #chatRow button { font-size: 14px; padding: 7px 9px; }
+    #chatIn { flex: 1; min-width: 0; text-align: left; }
     #menuMsg { color: #fca5a5; min-height: 22px; }
   </style>
 </head>
@@ -40,11 +57,23 @@
 
   <div id="gameUI" hidden>
     <div id="score"><span class="b" id="sb"></span> : <span class="r" id="sr"></span></div>
+    <div id="stage" class="noChat">
+      <div id="mainCol">
     <canvas id="game" width="900" height="520"></canvas>
     <p id="status"></p>
     <div id="readyRow">
       <button id="readyBlue" class="teamBtn blue">Gotowe ▶</button>
       <button id="readyRed" class="teamBtn red" hidden>Gotowe czerwony ▶</button>
+    </div>
+      </div>
+    <div id="chatBox" hidden>
+      <div id="chatTitle">Czat</div>
+      <div id="chatLog"></div>
+      <div id="chatRow">
+        <input type="text" id="chatIn" maxlength="200" placeholder="Napisz…" autocomplete="off">
+        <button id="chatSend">Wyślij</button>
+      </div>
+    </div>
     </div>
     <div id="controls">
       <label class="opt"><input type="checkbox" id="timerToggle" checked> Limit czasu (20 s)</label>
@@ -69,6 +98,7 @@
     let names = { blue: "Niebieski", red: "Czerwony" };
     let ws = null, session = null, pending = null, retryTimer = null, pingTimer = null;
     let selected = null, dragStart = null;
+    let chatLog = [];
 
     // ---------- Menu ----------
     const nick = () => $("nick").value.trim() || "Gracz";
@@ -126,6 +156,10 @@
       } else if (m.t === "s") {
         g.apply(m);
         if (g.phase !== "plan") { selected = null; dragStart = null; }
+      } else if (m.t === "chatlog") {
+        chatLog = m.log || []; renderChat();
+      } else if (m.t === "chat") {
+        chatLog.push(m); if (chatLog.length > 50) chatLog.shift(); renderChat();
       } else if (m.t === "error") {
         pending = null; leave(); menuMessage(m.msg);
       } else if (m.t === "closed") {
@@ -133,7 +167,36 @@
       }
     }
 
+    // ---------- Czat ----------
+    function renderChat() {
+      const box = $("chatLog");
+      box.textContent = "";
+      if (!chatLog.length) {
+        const e = document.createElement("div"); e.className = "empty"; e.textContent = "Tu pojawią się wiadomości.";
+        box.appendChild(e);
+      }
+      for (const m of chatLog) {
+        const line = document.createElement("div");
+        const who = document.createElement("b");
+        who.className = m.team === "blue" ? "b" : "r";
+        who.textContent = m.name + ": ";
+        line.appendChild(who);
+        line.appendChild(document.createTextNode(m.text));   // tekst, nie HTML
+        box.appendChild(line);
+      }
+      box.scrollTop = box.scrollHeight;
+    }
+    function sendChat() {
+      const input = $("chatIn"), text = input.value.trim();
+      if (!text || mode !== "online" || !connected) return;
+      sendMsg({ t: "chat", text });
+      input.value = "";
+    }
+    $("chatSend").onclick = sendChat;
+    $("chatIn").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+
     function leave() {
+      chatLog = []; renderChat();
       mode = null; session = null; pending = null; myTeam = null;
       sessionStorage.removeItem("globulos");
       clearTimeout(retryTimer); clearInterval(pingTimer);
@@ -293,6 +356,8 @@
         b.disabled = !canPlan();
       });
       $("copyLink").hidden = !online;
+      $("chatBox").hidden = !online;
+      $("stage").classList.toggle("noChat", !online);
       $("newGame").disabled = online && !(myTeam === "blue" || g.phase === "over");
       if (online) {
         $("timerToggle").checked = g.timerOn;
