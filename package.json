@@ -1,7 +1,7 @@
 {
-  "name": "globulos-private",
+  "name": "kulki",
   "version": "1.0.0",
-  "description": "Globulos Private - gra online dla znajomych",
+  "description": "Kulki - gra online dla znajomych",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18" },
