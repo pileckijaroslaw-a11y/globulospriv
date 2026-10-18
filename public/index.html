@@ -76,10 +76,11 @@
     <div class="menuRow"><label class="opt">Poziom komputera:
       <select id="level"><option value="easy">Łatwy</option><option value="medium" selected>Średni</option><option value="hard">Trudny</option></select>
     </label></div>
-    <div class="menuRow"><button id="btnAI">Graj z komputerem</button><button id="btnLocal">Dwie osoby, jeden ekran</button></div>
+    <div class="menuRow"><button id="btnAI">Football: z komputerem</button><button id="btnLocal">Football: dwie osoby, jeden ekran</button></div>
     <h3 class="lobbyTitle">Pokoje online</h3>
     <div id="roomList"></div>
-    <div class="menuRow"><input type="text" id="roomName" maxlength="24" placeholder="Nazwa pokoju (opcjonalnie)"><button id="btnCreate">Utwórz pokój</button></div>
+    <div class="menuRow"><input type="text" id="roomName" maxlength="24" placeholder="Nazwa pokoju (opcjonalnie)"></div>
+    <div class="menuRow"><button id="btnCreate">⚽ Utwórz pokój: Football</button><button id="btnCreateLms">🎯 Utwórz pokój: Last man standing</button></div>
     <p id="menuMsg"></p>
   </div>
 
@@ -105,6 +106,7 @@
     </div>
     </div>
     <div id="controls">
+      <button id="startBtn" class="teamBtn" hidden>START</button>
       <label class="opt"><input type="checkbox" id="timerToggle" checked> Limit czasu (20 s)</label>
       <button id="newGame">Nowa gra</button>
       <button id="leave">Wyjdź do menu</button>
@@ -114,10 +116,14 @@
 
   <script src="version.js"></script>
   <script src="game.js"></script>
+  <script src="lms.js"></script>
   <script>
     const { C, create } = Globulos;
     const { W, H, FIELD_L, FIELD_R, GOAL_TOP, GOAL_BOTTOM } = C;
     const g = create();
+    let gl = null;                                   // silnik trybu Last man standing (po starcie gry)
+    const LL = Lms.L, PCOL = Lms.COLORS;
+    let lastQueueKey = "";
     const $ = id => document.getElementById(id);
     const APP_TITLE = KulkiVersion.NAME + " v" + KulkiVersion.VERSION;   // np. „Kulki v1.1”
     document.title = APP_TITLE; $("appTitle").textContent = APP_TITLE;
@@ -147,16 +153,20 @@
     }
     $("btnAI").onclick = () => startLocal("ai");
     $("btnLocal").onclick = () => startLocal("local");
-    $("btnCreate").onclick = () => {
+    function createRoom(roomMode) {
       if (!connected) return menuMessage("Brak połączenia z serwerem.");
-      menuMessage(""); sendMsg({ t: "create", name: nick(), roomName: $("roomName").value });
-    };
+      menuMessage(""); sendMsg({ t: "create", mode: roomMode, name: nick(), roomName: $("roomName").value });
+    }
+    $("btnCreate").onclick = () => createRoom("football");
+    $("btnCreateLms").onclick = () => createRoom("lms");
+    $("startBtn").onclick = () => sendMsg({ t: "start" });
     function enterRoom(id) {
       if (!connected) return menuMessage("Brak połączenia z serwerem.");
       menuMessage(""); sendMsg({ t: "enter", roomId: id, name: nick() });
     }
 
     // ---------- Lista pokoi ----------
+    const STATUS_LMS = { waiting: "czeka na START", playing: "gra trwa", paused: "przerwa (ktoś się rozłączył)" };
     const STATUS_PL = { waiting: "czeka na graczy", playing: "gra trwa", paused: "przerwa (ktoś się rozłączył)" };
     function renderLobby() {
       const box = $("roomList");
@@ -170,7 +180,9 @@
         const info = document.createElement("div");
         const title = document.createElement("b"); title.textContent = r.name;
         const sub = document.createElement("div"); sub.className = "sub";
-        sub.textContent = "🔵 " + (r.blue || "—") + " vs 🔴 " + (r.red || "—") + " · w kolejce: " + r.queue + " · " + (STATUS_PL[r.status] || "");
+        sub.textContent = r.mode === "lms"
+          ? "🎯 Last man standing · graczy: " + r.players + (r.queue ? " (+" + r.queue + " obserwuje)" : "") + " · " + (STATUS_LMS[r.status] || "")
+          : "⚽ Football · 🔵 " + (r.blue || "—") + " vs 🔴 " + (r.red || "—") + " · w kolejce: " + r.queue + " · " + (STATUS_PL[r.status] || "");
         info.append(title, sub);
         const btn = document.createElement("button"); btn.textContent = "Wejdź";
         btn.onclick = () => enterRoom(r.id);
@@ -205,14 +217,29 @@
         sessionStorage.setItem("globulos", JSON.stringify(session));
         mode = "online"; g.aiTeam = null; showGame(true);
       } else if (m.t === "room") {
-        const team = m.you.role === "queue" ? null : m.you.role;
-        if (team !== myTeam) { g.ents.forEach(e => { e.plan = null; }); selected = dragStart = null; }
-        roomInfo = m; roomStatus = m.status; myTeam = team;
-        names = { blue: m.blue ? m.blue.name : "Niebieski", red: m.red ? m.red.name : "Czerwony" };
+        roomInfo = m; roomStatus = m.status;
+        if (m.mode === "lms") {
+          myTeam = null;
+          if (m.started && !gl) gl = Lms.create(m.players.length);
+          if (!m.started) { gl = null; selected = dragStart = null; }
+        } else {
+          gl = null;
+          const team = m.you.role === "queue" ? null : m.you.role;
+          if (team !== myTeam) { g.ents.forEach(e => { e.plan = null; }); selected = dragStart = null; }
+          myTeam = team;
+          names = { blue: m.blue ? m.blue.name : "Niebieski", red: m.red ? m.red.name : "Czerwony" };
+        }
         renderQueue();
       } else if (m.t === "s") {
-        g.apply(m);
-        if (g.phase !== "plan") { selected = null; dragStart = null; }
+        const eng = isLms() ? gl : g;
+        if (eng) {
+          eng.apply(m);
+          if (eng.phase !== "plan") { selected = null; dragStart = null; }
+          if (eng === gl) {   // panel graczy odświeżamy tylko gdy zmieni się kto jest gotowy lub odpadł
+            const key = gl.ready.join() + "|" + gl.out.join();
+            if (key !== lastQueueKey) { lastQueueKey = key; renderQueue(); }
+          }
+        }
       } else if (m.t === "chatlog") { chatLog = m.log || []; renderChat(); }
       else if (m.t === "chat") { chatLog.push(m); if (chatLog.length > 50) chatLog.shift(); renderChat(); }
       else if (m.t === "left") exitRoom(m.msg);
@@ -221,7 +248,7 @@
 
     function exitRoom(msg) {
       session = null; sessionStorage.removeItem("globulos");
-      mode = null; myTeam = null; roomInfo = null; roomStatus = "waiting"; selected = dragStart = null;
+      mode = null; myTeam = null; roomInfo = null; gl = null; roomStatus = "waiting"; selected = dragStart = null;
       chatLog = []; renderChat(); showGame(false); menuMessage(msg || "");
       sendMsg({ t: "lobby" });
     }
@@ -237,6 +264,7 @@
       $("roomTitle").textContent = roomInfo.name;
       const me = roomInfo.you.id;
       const add = (cls, text) => { const d = document.createElement("div"); if (cls) d.className = cls; d.textContent = text; box.appendChild(d); };
+      if (roomInfo.mode === "lms") return renderQueueLms(box, add, me);
       const who = p => p ? p.name + (p.id === me ? " (Ty)" : "") + (p.online ? "" : " – offline") : "—";
       add("b", "🔵 " + who(roomInfo.blue));
       add("r", "🔴 " + who(roomInfo.red));
@@ -256,6 +284,7 @@
         const line = document.createElement("div");
         const who = document.createElement("b");
         who.className = m.team === "blue" ? "b" : (m.team === "red" ? "r" : "q");
+        if (m.c) who.style.color = m.c;
         who.textContent = m.name + ": ";
         line.appendChild(who);
         line.appendChild(document.createTextNode(m.text));   // tekst, nie HTML
@@ -275,18 +304,24 @@
 
     // ---------- Sterowanie ----------
     const teamsOf = () => mode === "ai" ? ["blue"] : mode === "local" ? ["blue", "red"] : myTeam ? [myTeam] : [];
-    const canPlan = () => g.phase === "plan" && (mode !== "online" || (connected && roomStatus === "playing"));
+    const canPlan = () => isLms()
+      ? !!(gl && gl.phase === "plan" && connected && roomStatus === "playing" && myIdx() >= 0 && !gl.out[myIdx()])
+      : g.phase === "plan" && (mode !== "online" || (connected && roomStatus === "playing"));
 
     function controllable() {
       if (!canPlan()) return [];
+      if (isLms()) return gl.ents.filter(e => e.owner === myIdx() && e.alive && !gl.ready[myIdx()]);
       return g.ents.filter(e => e.team !== "ball" && e.alive && teamsOf().includes(e.team) && !g.ready[e.team]);
     }
     function sendPlans() {
       if (mode !== "online") return;
+      if (isLms()) return sendMsg({ t: "plans", plans: gl.ents.filter(e => e.owner === myIdx()).map(e => e.plan) });
       sendMsg({ t: "plans", plans: g.ents.filter(e => e.team === myTeam).map(e => e.plan) });
     }
     // Na telefonie w pionie boisko jest obrócone (bramki u góry i u dołu), a własna drużyna jest na dole.
-    const viewRot = () => portrait ? (myTeam === "red" ? 2 : 1) : 0;
+    const isLms = () => mode === "online" && !!roomInfo && roomInfo.mode === "lms";
+    const myIdx = () => isLms() ? roomInfo.you.idx : -1;
+    const viewRot = () => (portrait && !isLms()) ? (myTeam === "red" ? 2 : 1) : 0;
     function getPos(ev) {
       const r = canvas.getBoundingClientRect();
       const cx = (ev.clientX - r.left) * canvas.width / r.width, cy = (ev.clientY - r.top) * canvas.height / r.height;
@@ -326,7 +361,14 @@
       }
       g.ready[team] = v;   // w trybie online serwer i tak potwierdzi stan
     }
-    $("readyBlue").onclick = () => toggleReady(mode === "online" ? myTeam : "blue");
+    function toggleReadyLms() {
+      if (!canPlan()) return;
+      const i = myIdx(), v = !gl.ready[i];
+      if (v) sendPlans();
+      sendMsg({ t: v ? "ready" : "unready" });
+      gl.ready[i] = v;
+    }
+    $("readyBlue").onclick = () => isLms() ? toggleReadyLms() : toggleReady(mode === "online" ? myTeam : "blue");
     $("readyRed").onclick = () => toggleReady(mode === "online" ? myTeam : "red");
     $("newGame").onclick = () => { selected = null; g.newGame(); };
     $("timerToggle").onchange = () => {
@@ -372,23 +414,23 @@
       if (!p.alive || !p.plan || p.team === "ball" || g.phase !== "plan") return;
       if (!teamsOf().includes(p.team)) return;               // cudzych planów nie rysujemy
       if (mode !== "ai" && g.ready[p.team]) return;          // kto kliknął GOTOWE, ma ukryte strzałki
+      drawArrow(p, p.team === "blue" ? "#1e3a8a" : "#7f1d1d");
+    }
+    // Strzałka: trzon zwęża się od średnicy kulki, na końcu grot. Kolor wg siły, obrys podany.
+    function drawArrow(p, outline) {
       const speed = Math.hypot(p.plan.vx, p.plan.vy), power = speed / C.SHOT_SCALE;
       const nx = p.plan.vx / speed, ny = p.plan.vy / speed;
       const len = p.r + 30 + power * 1.3;                     // od środka kulki do czubka
-      // Kolor zależy od siły: zielony, żółty, pomarańczowy, czerwony. Obrys ma kolor drużyny.
       const color = power < 25 ? "#22c55e" : power < 50 ? "#facc15" : power < 75 ? "#f97316" : "#ef4444";
-      // Trzon zwęża się od średnicy kulki (u podstawy, pod kulką) do wąskiego końca, a na końcu jest grot.
       const headLen = 26, headHalf = 13, tipHalf = 4;
-      const s = Math.max(len - headLen, 0);                    // gdzie kończy się trzon, a zaczyna grot
-      const px = -ny, py = nx;                                 // wektor prostopadły do kierunku strzału
+      const sEnd = Math.max(len - headLen, 0), px = -ny, py = nx;
       const pt = (along, side) => [p.x + nx * along + px * side, p.y + ny * along + py * side];
-      const pts = [pt(0, p.r), pt(s, tipHalf), pt(s, headHalf), pt(len, 0), pt(s, -headHalf), pt(s, -tipHalf), pt(0, -p.r)];
+      const pts = [pt(0, p.r), pt(sEnd, tipHalf), pt(sEnd, headHalf), pt(len, 0), pt(sEnd, -headHalf), pt(sEnd, -tipHalf), pt(0, -p.r)];
       ctx.beginPath();
-      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      pts.forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.closePath();
       ctx.fillStyle = color; ctx.fill();
-      ctx.lineWidth = 3; ctx.lineJoin = "round";
-      ctx.strokeStyle = p.team === "blue" ? "#1e3a8a" : "#7f1d1d"; ctx.stroke();
+      ctx.lineWidth = 3; ctx.lineJoin = "round"; ctx.strokeStyle = outline; ctx.stroke();
     }
     function banner(text, sub) {
       const cw = canvas.width, ch = canvas.height, big = cw < 600 ? 26 : 44;
@@ -397,7 +439,40 @@
       ctx.font = "bold " + big + "px Arial"; ctx.fillText(text, cw / 2, ch / 2 + (sub ? 4 : big / 3));
       if (sub) { ctx.font = (cw < 600 ? 15 : 20) + "px Arial"; ctx.fillText(sub, cw / 2, ch / 2 + 32); }
     }
+    // Tryb Last man standing: okrągła arena, dziura pośrodku, kulki w kolorach graczy.
+    function drawLms() {
+      const c = LL.S / 2;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "#17212b"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.beginPath(); ctx.arc(c, c, LL.R, 0, Math.PI * 2); ctx.fillStyle = "#3f8f3f"; ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 2;
+      for (const f of [0.66]) { ctx.beginPath(); ctx.arc(c, c, LL.R * f, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(c, c, LL.R, 0, Math.PI * 2); ctx.lineWidth = 8; ctx.strokeStyle = "#64748b"; ctx.stroke();
+      ctx.beginPath(); ctx.arc(c, c, LL.HOLE_R, 0, Math.PI * 2); ctx.fillStyle = "#05080b"; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = "#475569"; ctx.stroke();
+      if (gl) {
+        const mine = myIdx();
+        if (gl.phase === "plan" && mine >= 0 && !gl.out[mine] && !gl.ready[mine])
+          gl.ents.forEach(e => { if (e.owner === mine && e.alive && e.plan) drawArrow(e, PCOL[mine]); });
+        for (const e of gl.ents) {
+          if (!e.alive) continue;
+          ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2); ctx.fillStyle = PCOL[e.owner]; ctx.fill();
+          ctx.lineWidth = e === selected ? 5 : 3; ctx.strokeStyle = e === selected ? "#facc15" : "#ffffff"; ctx.stroke();
+          ctx.beginPath(); ctx.arc(e.x - 5, e.y - 6, 4, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.fill();
+        }
+        if (gl.phase === "plan" && gl.timerOn) {
+          ctx.fillStyle = "#e2e8f0"; ctx.font = "bold 22px Arial"; ctx.textAlign = "center";
+          ctx.fillText(Math.ceil(Math.max(gl.timeLeft, 0)) + " s", c, 28);
+        }
+      }
+      if (!connected) banner("Łączenie…");
+      else if (!roomInfo.started) banner("Czekamy na graczy…", roomInfo.host === roomInfo.you.id ? "Kliknij START, gdy wszyscy dołączą" : "Czekamy, aż założyciel kliknie START");
+      else if (roomStatus === "paused") banner("Gracz się rozłączył…", "Czekamy, aż wróci");
+      else if (gl && gl.phase === "over") banner(gl.winner >= 0 ? "WYGRYWA " + roomInfo.players[gl.winner].name.toUpperCase() : "REMIS", "Za chwilę kolejna runda…");
+    }
+
     function draw() {
+      if (isLms()) return drawLms();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const rot = viewRot();
@@ -424,8 +499,57 @@
 
     // ---------- Interfejs ----------
     const teamPl = t => t === "blue" ? "niebieskich" : "czerwonych";
+    function renderQueueLms(box, add, me) {
+      $("roomTitle").textContent = "🎯 " + roomInfo.name;
+      add("qh", "Gracze (" + roomInfo.players.length + "/" + LL.MAX_PLAYERS + "):");
+      roomInfo.players.forEach((p, i) => {
+        const d = document.createElement("div"), dot = document.createElement("span");
+        dot.textContent = "● "; dot.style.color = PCOL[i];
+        let t = p.name + (p.id === me ? " (Ty)" : "") + (p.id === roomInfo.host ? " ★" : "") + (p.online ? "" : " – offline");
+        if (roomInfo.started) { if (p.out) t += " ✖"; else if (gl && gl.ready[i]) t += " ✔"; }
+        d.append(dot, document.createTextNode(t));
+        if (roomInfo.started && p.out) d.style.opacity = "0.5";
+        box.appendChild(d);
+      });
+      if (roomInfo.spectators.length) {
+        add("qh", "Obserwatorzy:");
+        roomInfo.spectators.forEach(p => add("q", p.name + (p.id === me ? " (Ty)" : "")));
+      }
+    }
+
+    function updateLmsUI() {
+      const info = roomInfo, me = info.you.idx, host = info.host === info.you.id;
+      $("score").hidden = true; $("newGame").hidden = true; $("readyRed").hidden = true;
+      $("chatBox").hidden = false;
+      const mineReady = !!(gl && me >= 0 && gl.ready[me]);
+      const b = $("readyBlue");
+      b.hidden = !(info.started && me >= 0 && gl && !gl.out[me]);
+      b.classList.toggle("ready", mineReady);
+      b.textContent = mineReady ? "✔ Gotowe (cofnij)" : "Gotowe ▶";
+      b.disabled = !canPlan();
+      $("startBtn").hidden = !(host && !info.started);
+      $("startBtn").disabled = info.players.filter(p => p.online).length < 2;
+      $("startBtn").textContent = "START (" + info.players.length + " graczy)";
+      $("timerToggle").checked = info.timerOn; $("timerToggle").disabled = !host;
+      let text;
+      if (!connected) text = "Brak połączenia z serwerem, próbuję ponownie…";
+      else if (!info.started) text = host ? "Poczekaj na graczy i kliknij START (potrzeba co najmniej 2 osób)." : "Czekamy, aż założyciel pokoju kliknie START.";
+      else if (!gl) text = "Ładowanie gry…";
+      else if (roomStatus === "paused") text = "Któryś z graczy się rozłączył. Czekamy na jego powrót.";
+      else if (gl.phase === "plan") {
+        text = "Planowanie ruchów" + (gl.timerOn ? ", czas: " + Math.ceil(Math.max(gl.timeLeft, 0)) + " s" : " (bez limitu czasu)");
+        const wait = info.players.filter((p, i) => !gl.ready[i]).map(p => p.name);
+        if (wait.length && wait.length < info.players.length) text += " | czekamy na: " + wait.join(", ");
+      } else if (gl.phase === "sim") text = "Kulki w ruchu…";
+      else text = gl.winner >= 0 ? "Koniec! Wygrywa " + info.players[gl.winner].name + "." : "Koniec! Remis.";
+      const role = !info.started || !gl ? "" : me < 0 ? "Obserwujesz. " : gl.out[me] ? "Odpadłeś, obserwujesz. " : "Grasz. ";
+      $("status").textContent = role + text;
+    }
+
     function updateUI() {
+      if (isLms()) return updateLmsUI();
       const online = mode === "online";
+      $("score").hidden = false; $("startBtn").hidden = true;
       $("sb").textContent = names.blue + " " + g.score.blue;
       $("sr").textContent = g.score.red + " " + names.red;
       $("readyBlue").hidden = online ? myTeam !== "blue" : false;
@@ -469,9 +593,10 @@
     // ---------- Dopasowanie do ekranu (telefon w pionie i w poziomie) ----------
     function layout() {
       const vw = window.innerWidth, vh = window.innerHeight;
-      portrait = vh > vw && vw < 900;
-      const cw = portrait ? H : W, ch = portrait ? W : H;
-      if (canvas.width !== cw) { canvas.width = cw; canvas.height = ch; }
+      const lms = isLms();
+      portrait = !lms && vh > vw && vw < 900;
+      const cw = lms ? LL.S : (portrait ? H : W), ch = lms ? LL.S : (portrait ? W : H);
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
       const chatW = (mode === "online" && vw > 900) ? 252 : 0;
       const byWidth = Math.min(cw, vw * 0.96 - chatW);
       const byHeight = Math.max(240, vh - 190) * cw / ch;       // miejsce na nagłówek, napisy i przyciski
@@ -486,7 +611,7 @@
         while (acc >= C.STEP_MS) { g.step(); acc -= C.STEP_MS; }
       } else acc = 0;                                    // online: stan przychodzi z serwera
       if (!$("gameUI").hidden) {
-        const key = window.innerWidth + "x" + window.innerHeight + mode + myTeam;
+        const key = window.innerWidth + "x" + window.innerHeight + mode + myTeam + (isLms() ? "L" : "F");
         if (key !== layoutKey) { layoutKey = key; layout(); }
         draw(); updateUI();
       }
