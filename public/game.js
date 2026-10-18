@@ -2,7 +2,7 @@
 (function (root) {
   const C = {
     W: 810, H: 468, FIELD_L: 36, FIELD_R: 774, GOAL_TOP: 171, GOAL_BOTTOM: 297, POST_R: 6,
-    PLAYER_R: 19, BALL_R: 12, SHOT_SCALE: 0.12, MAX_DRAG: 100, MAX_SPEED: 14, STOP_SPEED: 0.04,
+    PLAYER_R: 19, BALL_R: 12, SHOT_SCALE: 0.132, MAX_DRAG: 100, MAX_SPEED: 14, STOP_SPEED: 0.04,
     WALL_E: 0.8, BALL_E: 0.65, FOOTBALL_E: 0.8, STEP_MS: 1000 / 60,
     PLAN_TIME: 20, WIN_SCORE: 3, MAX_SIM_STEPS: 900, GOAL_STEPS: 100
   };
@@ -34,10 +34,10 @@
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
     const vec = (angle, power) => ({ vx: Math.cos(angle) * power * C.SHOT_SCALE, vy: Math.sin(angle) * power * C.SHOT_SCALE });
 
-    // Plan "leć do punktu": siła ~ odległość / 7.9 (zasięg przy tarciu) + dodatek.
+    // Plan "leć do punktu": siła ~ odległość / (SHOT_SCALE * 66) (zasięg przy tarciu) + dodatek.
     function toPoint(p, tx, ty, extra, jitter) {
       const dx = tx - p.x, dy = ty - p.y, d = Math.hypot(dx, dy) || 1;
-      return vec(Math.atan2(dy, dx) + (Math.random() - 0.5) * jitter, clamp(d / 7.9 + extra, 8, C.MAX_DRAG));
+      return vec(Math.atan2(dy, dx) + (Math.random() - 0.5) * jitter, clamp(d / (C.SHOT_SCALE * 66) + extra, 8, C.MAX_DRAG));
     }
 
     // Prosty schemat: napastnik uderza piłkę w stronę bramki, drugi jedzie na piłkę, trzeci broni.

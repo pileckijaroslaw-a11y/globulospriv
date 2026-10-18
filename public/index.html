@@ -2,10 +2,15 @@
 <html lang="pl">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Kulki</title>
   <style>
     body { margin: 0; background: #17212b; color: white; font-family: Arial, sans-serif; text-align: center; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+    input[type=text] { user-select: text; -webkit-user-select: text; }
+    button, select, label { touch-action: manipulation; }
     h1 { margin: 16px 0 4px; }
     p { color: #cbd5e1; margin: 6px 12px; }
     #score { font-size: 26px; font-weight: bold; margin: 6px 0; }
@@ -34,6 +39,14 @@
     .teamBtn.blue.ready, .teamBtn.red.ready { background: #16a34a; }
     button:disabled { opacity: 0.6; cursor: default; }
     label.opt { display: flex; align-items: center; gap: 8px; font-size: 16px; color: #e2e8f0; cursor: pointer; }
+    @media (max-width: 600px) {
+      h1 { font-size: 22px; margin: 8px 0 2px; }
+      #score { font-size: 20px; margin: 2px 0; }
+      button, select, input[type=text] { min-height: 44px; }
+      .teamBtn { min-width: 0; flex: 1; margin: 0 3px; }
+      #status { font-size: 15px; }
+      #roomName { width: 100%; max-width: 280px; }
+    }
     #status { font-size: 17px; color: #fde68a; min-height: 24px; }
     #stage { display: flex; justify-content: center; align-items: flex-start; gap: 12px; margin: 0 auto; }
     #mainCol { width: min(810px, calc(96vw - 252px)); }
@@ -96,7 +109,7 @@
       <button id="newGame">Nowa gra</button>
       <button id="leave">Wyjdź do menu</button>
     </div>
-    <p>Przeciągnij od swojej kulki, by ustawić kierunek i siłę. Stuknięcie w kulkę kasuje jej plan. Gdy ustawisz wszystkie, kliknij „Gotowe”. Gdy obie strony są gotowe, kulki ruszają naraz.</p>
+    <p>Na telefonie pociągnij palcem swoją kulkę do tyłu jak cięciwę łuku: strzałka pokaże, w którą stronę poleci. Im dalej pociągniesz, tym mocniejszy strzał (zielony → żółty → pomarańczowy → czerwony). Stuknięcie w kulkę kasuje jej plan. Gdy ustawisz wszystkie, kliknij „Gotowe”. Gdy obie strony są gotowe, kulki ruszają naraz.</p>
   </div>
 
   <script src="version.js"></script>
@@ -116,6 +129,7 @@
     let names = { blue: "Niebieski", red: "Czerwony" };
     let ws = null, session = null, retryTimer = null, pingTimer = null;
     let selected = null, dragStart = null;
+    let portrait = false, layoutKey = "";
     let chatLog = [];
 
     // ---------- Menu ----------
@@ -271,13 +285,17 @@
       if (mode !== "online") return;
       sendMsg({ t: "plans", plans: g.ents.filter(e => e.team === myTeam).map(e => e.plan) });
     }
+    // Na telefonie w pionie boisko jest obrócone (bramki u góry i u dołu), a własna drużyna jest na dole.
+    const viewRot = () => portrait ? (myTeam === "red" ? 2 : 1) : 0;
     function getPos(ev) {
       const r = canvas.getBoundingClientRect();
-      return { x: (ev.clientX - r.left) * W / r.width, y: (ev.clientY - r.top) * H / r.height };
+      const cx = (ev.clientX - r.left) * canvas.width / r.width, cy = (ev.clientY - r.top) * canvas.height / r.height;
+      const rot = viewRot();
+      return rot === 0 ? { x: cx, y: cy } : rot === 1 ? { x: W - cy, y: cx } : { x: cy, y: H - cx };
     }
     canvas.addEventListener("pointerdown", ev => {
       const pos = getPos(ev);
-      selected = controllable().find(p => Math.hypot(p.x - pos.x, p.y - pos.y) <= p.r + 8) || null;
+      selected = controllable().find(p => Math.hypot(p.x - pos.x, p.y - pos.y) <= p.r + (ev.pointerType === "touch" ? 22 : 8)) || null;
       if (selected) { dragStart = pos; canvas.setPointerCapture(ev.pointerId); }
     });
     canvas.addEventListener("pointermove", ev => {
@@ -285,7 +303,7 @@
       const pos = getPos(ev), dx = pos.x - dragStart.x, dy = pos.y - dragStart.y, d = Math.hypot(dx, dy);
       if (d > 5) {
         const power = Math.min(d, C.MAX_DRAG);
-        selected.plan = { vx: dx / d * power * C.SHOT_SCALE, vy: dy / d * power * C.SHOT_SCALE };
+        selected.plan = { vx: -dx / d * power * C.SHOT_SCALE, vy: -dy / d * power * C.SHOT_SCALE };   // jak cięciwa łuku: strzał w stronę przeciwną do pociągnięcia
       }
     });
     function release(ev) {
@@ -355,30 +373,44 @@
       if (!teamsOf().includes(p.team)) return;               // cudzych planów nie rysujemy
       if (mode !== "ai" && g.ready[p.team]) return;          // kto kliknął GOTOWE, ma ukryte strzałki
       const speed = Math.hypot(p.plan.vx, p.plan.vy), power = speed / C.SHOT_SCALE;
-      const nx = p.plan.vx / speed, ny = p.plan.vy / speed, len = 35 + power * 1.2;
-      const ex = p.x + nx * len, ey = p.y + ny * len, a = Math.atan2(ny, nx);
-      ctx.strokeStyle = power > 70 ? "#fde047" : (p.team === "blue" ? "#1e3a8a" : "#7f1d1d");
-      ctx.lineWidth = 4; ctx.lineCap = "round";
-      ctx.beginPath(); ctx.moveTo(p.x + nx * p.r, p.y + ny * p.r); ctx.lineTo(ex, ey);
-      ctx.moveTo(ex, ey); ctx.lineTo(ex - 12 * Math.cos(a - Math.PI / 6), ey - 12 * Math.sin(a - Math.PI / 6));
-      ctx.moveTo(ex, ey); ctx.lineTo(ex - 12 * Math.cos(a + Math.PI / 6), ey - 12 * Math.sin(a + Math.PI / 6));
-      ctx.stroke();
+      const nx = p.plan.vx / speed, ny = p.plan.vy / speed;
+      const len = p.r + 30 + power * 1.3;                     // od środka kulki do czubka
+      // Kolor zależy od siły: zielony, żółty, pomarańczowy, czerwony. Obrys ma kolor drużyny.
+      const color = power < 25 ? "#22c55e" : power < 50 ? "#facc15" : power < 75 ? "#f97316" : "#ef4444";
+      // Trzon zwęża się od średnicy kulki (u podstawy, pod kulką) do wąskiego końca, a na końcu jest grot.
+      const headLen = 26, headHalf = 13, tipHalf = 4;
+      const s = Math.max(len - headLen, 0);                    // gdzie kończy się trzon, a zaczyna grot
+      const px = -ny, py = nx;                                 // wektor prostopadły do kierunku strzału
+      const pt = (along, side) => [p.x + nx * along + px * side, p.y + ny * along + py * side];
+      const pts = [pt(0, p.r), pt(s, tipHalf), pt(s, headHalf), pt(len, 0), pt(s, -headHalf), pt(s, -tipHalf), pt(0, -p.r)];
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath();
+      ctx.fillStyle = color; ctx.fill();
+      ctx.lineWidth = 3; ctx.lineJoin = "round";
+      ctx.strokeStyle = p.team === "blue" ? "#1e3a8a" : "#7f1d1d"; ctx.stroke();
     }
     function banner(text, sub) {
-      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0, H / 2 - 50, W, 100);
+      const cw = canvas.width, ch = canvas.height, big = cw < 600 ? 26 : 44;
+      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0, ch / 2 - 50, cw, 100);
       ctx.fillStyle = "#fff"; ctx.textAlign = "center";
-      ctx.font = "bold 44px Arial"; ctx.fillText(text, W / 2, H / 2 + (sub ? 6 : 16));
-      if (sub) { ctx.font = "20px Arial"; ctx.fillText(sub, W / 2, H / 2 + 36); }
+      ctx.font = "bold " + big + "px Arial"; ctx.fillText(text, cw / 2, ch / 2 + (sub ? 4 : big / 3));
+      if (sub) { ctx.font = (cw < 600 ? 15 : 20) + "px Arial"; ctx.fillText(sub, cw / 2, ch / 2 + 32); }
     }
     function draw() {
-      ctx.clearRect(0, 0, W, H);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const rot = viewRot();
+      if (rot === 1) ctx.setTransform(0, -1, 1, 0, 0, W);          // obrót: niebiescy na dole
+      else if (rot === 2) ctx.setTransform(0, 1, -1, 0, H, 0);     // obrót: czerwoni na dole
       drawPitch();
       g.ents.forEach(drawPlan);
       g.ents.filter(e => e.alive && e.team !== "ball").forEach(drawEntity);
       drawEntity(g.ball);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);                          // napisy rysujemy już bez obrotu
       if (g.phase === "plan" && g.timerOn) {
         ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.font = "bold 22px Arial"; ctx.textAlign = "center";
-        ctx.fillText(Math.ceil(Math.max(g.timeLeft, 0)) + " s", W / 2, 30);
+        ctx.fillText(Math.ceil(Math.max(g.timeLeft, 0)) + " s", canvas.width / 2, 30);
       }
       if (mode === "online" && !connected) banner("Łączenie…");
       else if (mode === "online" && roomStatus === "waiting") banner("Czekamy na drugiego gracza…", roomInfo ? roomInfo.name : "");
@@ -434,6 +466,18 @@
       $("status").textContent = rolePrefix + text;
     }
 
+    // ---------- Dopasowanie do ekranu (telefon w pionie i w poziomie) ----------
+    function layout() {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      portrait = vh > vw && vw < 900;
+      const cw = portrait ? H : W, ch = portrait ? W : H;
+      if (canvas.width !== cw) { canvas.width = cw; canvas.height = ch; }
+      const chatW = (mode === "online" && vw > 900) ? 252 : 0;
+      const byWidth = Math.min(cw, vw * 0.96 - chatW);
+      const byHeight = Math.max(240, vh - 190) * cw / ch;       // miejsce na nagłówek, napisy i przyciski
+      $("mainCol").style.width = Math.max(200, Math.min(byWidth, byHeight)) + "px";
+    }
+
     // ---------- Pętla główna ----------
     let last = performance.now(), acc = 0;
     function loop(now) {
@@ -441,7 +485,11 @@
       if (mode === "ai" || mode === "local") {          // lokalnie liczymy fizykę sami
         while (acc >= C.STEP_MS) { g.step(); acc -= C.STEP_MS; }
       } else acc = 0;                                    // online: stan przychodzi z serwera
-      if (!$("gameUI").hidden) { draw(); updateUI(); }
+      if (!$("gameUI").hidden) {
+        const key = window.innerWidth + "x" + window.innerHeight + mode + myTeam;
+        if (key !== layoutKey) { layoutKey = key; layout(); }
+        draw(); updateUI();
+      }
       requestAnimationFrame(loop);
     }
 
